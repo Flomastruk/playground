@@ -1,0 +1,17 @@
+services:
+  playground:
+    # image: python:3.12-bookworm
+    build:
+      context: ../
+      dockerfile: .devcontainer/Dockerfile
+    container_name: playground
+    restart: always
+    tty: true
+    # command: sleep infinity
+    volumes:
+      # this is the *bind* mount
+      - ../:/workspace
+      # this mirrors volume defined in top-level `volumes` section
+      - data:/data
+volumes:
+  data:
