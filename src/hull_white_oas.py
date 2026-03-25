@@ -4,8 +4,6 @@ import numpy as np
 import polars as pl
 import QuantLib as ql
 
-import plotly.express as px
-
 
 class CurveMode(Enum):
     FLAT = auto()
@@ -86,7 +84,23 @@ def calc_zc_bond(
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
-        theta0 = a * r + sigma**2 / (2.0 * a)
+        prev_settle_date = bond.calendar().advance(
+            d, bond.settlementDays() - 1, ql.Days
+        )
+        prev_zero_rates = [r] + [
+            r
+            + (
+                (1.0 / a)
+                * (short_rate - r)
+                * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                + ((sigma**2) / (4.0 * a**3))
+                * (1.0 - np.exp(-2.0 * a * (settle_date - prev_settle_date) / 360.0))
+                * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
+            )
+            / ((d_ - settle_date) / 360.0)
+            for d_ in dates[1:]
+        ]
+        theta0 = a * r
     elif model_param.curve_mode == CurveMode.FLATINCEPTION:
         # zero rates consistent with flat term structure as of bond issue date
         # (!) for settle_date = bond issue date, this is flat structure but generally not so
@@ -103,6 +117,7 @@ def calc_zc_bond(
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
+        prev_zero_rates = zero_rates
         theta0 = a * r + sigma**2 / (2 * a) * (
             1.0 - np.exp(-2.0 * a * (settle_date - bond.issueDate()) / 360.0)
         )
@@ -128,6 +143,7 @@ def calc_zc_bond(
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
+        prev_zero_rates = zero_rates
         theta0 = a * r
     elif (
         model_param.curve_mode == CurveMode.ROLLDOWN
@@ -148,9 +164,10 @@ def calc_zc_bond(
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
+        prev_zero_rates = zero_rates
         theta0 = a * r + sigma**2 / a
     else:
-        zero_rates = []
+        prev_zero_rates = zero_rates = []
         theta0 = 0.0
         NotImplementedError(f"Unrecognized curve_mode: {model_param.curve_mode}")
 
@@ -163,6 +180,7 @@ def calc_zc_bond(
         ql.Compounded,
         ql.Semiannual,
     )
+
     # forwards =  [curve.forwardRate(d_, d_, ql.Actual360(), ql.Compounded, ql.Semiannual).rate() for d_ in dates] # transform back
     ts_handle = ql.YieldTermStructureHandle(curve)
 
@@ -173,6 +191,7 @@ def calc_zc_bond(
     )
     bond.setPricingEngine(engine)
 
+    price = bond.cleanPrice()
     coupon = {cf.date(): cf.amount() for cf in bond.cashflows()}.get(d, 0.0)
     effective_duration = bond.effectiveDuration(
         0.0, ts_handle, ql.Actual360(), ql.Compounded, ql.Semiannual, 5e-4
@@ -187,6 +206,26 @@ def calc_zc_bond(
     )
     pde_convexity = pde_duration**2
 
+    # rolling the curve
+    if model_param.curve_mode == CurveMode.FLAT:
+        prev_curve = ql.ZeroCurve(
+            dates,
+            prev_zero_rates,
+            ql.Actual360(),
+            bond.calendar(),
+            ql.Linear(),
+            ql.Compounded,
+            ql.Semiannual,
+        )
+        engine = ql.TreeCallableFixedRateBondEngine(
+            ql.HullWhite(ql.YieldTermStructureHandle(prev_curve), a, sigma),
+            model_param.grid_points,
+        )
+        bond.setPricingEngine(engine)
+        rolled_price = bond.cleanPrice()
+    else:
+        rolled_price = price
+
     return {
         "date": d.to_date(),
         "settle_date": settle_date.to_date(),
@@ -195,7 +234,8 @@ def calc_zc_bond(
         "sigma": sigma,
         "theta0": theta0,
         "short_rate": short_rate,
-        "price": bond.cleanPrice(),
+        "price": price,
+        "rolled_price": rolled_price,
         "coupon": coupon,
         "effective_duration": effective_duration,
         "pde_duration": pde_duration,
@@ -223,7 +263,7 @@ def pnl_decomposition(res: pl.DataFrame) -> pl.DataFrame:
             dv_dt_dur=pl.col("pde_duration")
             .mul("price")
             .mul(pl.col("theta0") - pl.col("a").mul("short_rate")),
-            # dv_dt_conv=pl.col("effective_convexity") # EA: (!!!) this is wrong
+            # dv_dt_conv=pl.col("effective_convexity") # effective_convexity<>pde_convexity
             dv_dt_conv=pl.col("pde_convexity")
             .mul("price")
             .mul(0.05**2)
@@ -237,12 +277,19 @@ def pnl_decomposition(res: pl.DataFrame) -> pl.DataFrame:
             pnl_oas=pl.col("dv_dt_oas").mul(pl.col("ddays")).truediv(360.0),
             pnl_dur=pl.col("dv_dt_dur").mul(pl.col("ddays")).truediv(360.0),
             pnl_conv=pl.col("dv_dt_conv").mul(pl.col("ddays")).truediv(360.0),
+            pnl_roll=(pl.col("price") - pl.col("rolled_price")).shift(-1),
         )
         .with_columns(
-            pnl_oas_full=pl.col("pnl_oas") + pl.col("pnl_dur") + pl.col("pnl_conv"),
-            pnl_err=(pl.col("pnl_oas") + pl.col("pnl_dur") + pl.col("pnl_conv")).sub(
-                pl.col("pnl")
-            ),
+            pnl_oas_full=pl.col("pnl_oas")
+            + pl.col("pnl_dur")
+            + pl.col("pnl_conv")
+            + pl.col("pnl_roll"),
+            pnl_err=(
+                pl.col("pnl_oas")
+                + pl.col("pnl_dur")
+                + pl.col("pnl_conv")
+                + pl.col("pnl_roll")
+            ).sub(pl.col("pnl")),
         )
     )
 
@@ -251,6 +298,7 @@ def pnl_decomposition(res: pl.DataFrame) -> pl.DataFrame:
         cpnl_oas=pl.col("pnl_oas").cum_sum(),
         cpnl_dur=pl.col("pnl_dur").cum_sum(),
         cpnl_conv=pl.col("pnl_conv").cum_sum(),
+        cpnl_roll=pl.col("pnl_roll").cum_sum(),
         cpnl_oas_full=pl.col("pnl_oas_full").cum_sum(),
     )
     return res
