@@ -41,93 +41,94 @@ def _gen_rate_curves(
     r = model_param.r
     a = model_param.a
     sigma = model_param.sigma
-    if model_param.curve_mode == CurveMode.FLAT:
-        # This formula is taken from "Flat at Inception" by setting t_0=t (PDE rolls)
-        # note: if short_rate == r this reduces to flat curve
-        zero_rates = [short_rate] + [
-            r
-            + (1.0 / a)
-            * (short_rate - r)
-            * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
-            / ((d_ - settle_date) / 360.0)
-            for d_ in dates[1:]
-        ]
-        prev_zero_rates = [r] + [
-            r
-            + (
-                (1.0 / a)
+    match model_param.curve_mode:
+        case CurveMode.FLAT:
+            # This formula is taken from "Flat at Inception" by setting t_0=t (PDE rolls)
+            # note: if short_rate == r this reduces to flat curve
+            zero_rates = [short_rate] + [
+                r
+                + (1.0 / a)
                 * (short_rate - r)
                 * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
-                + ((sigma**2) / (4.0 * a**3))
-                * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
-                * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
-            )
-            / ((d_ - settle_date) / 360.0)
-            for d_ in dates[1:]
-        ]
-    elif model_param.curve_mode == CurveMode.FLATINCEPTION:
-        # zero rates consistent with flat term structure as of bond issue date
-        # (!) for settle_date = bond issue date, this is flat structure but generally not so
-        zero_rates = [r] + [
-            r
-            + (
-                (1.0 / a)
-                * (short_rate - r)
-                * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
-                + ((sigma**2) / (4.0 * a**3))
-                * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
-                * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
-            )
-            / ((d_ - settle_date) / 360.0)
-            for d_ in dates[1:]
-        ]
-        prev_zero_rates = zero_rates
-    elif (
-        model_param.curve_mode == CurveMode.ROLLUP
-    ):  # this curve is "lifting up" over time
-        # forwards = [flat_rate] + [flat_rate - (sigma**2)/(2*a**2)*np.square(1. - np.exp(-a*(d_-d)/360)) for d_ in dates[1:]]
-        # curve = ql.ForwardCurve(list(dates), forwards, ql.Actual360(), bond.calendar()) # this doesn't admit semiannual compounding
-        zero_rates = [r] + [
-            r
-            - ((sigma**2) / (2.0 * a**2))
-            * (
-                (1.0 / a)
-                * (short_rate - r)
-                * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                / ((d_ - settle_date) / 360.0)
+                for d_ in dates[1:]
+            ]
+            prev_zero_rates = [r] + [
+                r
                 + (
-                    ((d_ - settle_date) / 360.0)
-                    - (2.0 / a) * (1.0 - np.exp(-a * ((d_ - settle_date) / 360.0)))
-                    + (0.5 / a)
-                    * (1.0 - np.exp(-2.0 * a * ((d_ - settle_date) / 360.0)))
+                    (1.0 / a)
+                    * (short_rate - r)
+                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    + ((sigma**2) / (4.0 * a**3))
+                    * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
+                    * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
                 )
-            )
-            / ((d_ - settle_date) / 360.0)
-            for d_ in dates[1:]
-        ]
-        prev_zero_rates = zero_rates
-    elif (
-        model_param.curve_mode == CurveMode.ROLLDOWN
-    ):  # this curve is "shifting down" over time (intuitive situation)
-        zero_rates = [r] + [
-            r
-            + (
-                (1.0 / a)
-                * (short_rate - r)
-                * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
-                + ((sigma**2) / (2.0 * a**2))
+                / ((d_ - settle_date) / 360.0)
+                for d_ in dates[1:]
+            ]
+        case CurveMode.FLATINCEPTION:
+            # zero rates consistent with flat term structure as of bond issue date
+            # (!) for settle_date = bond issue date, this is flat structure but generally not so
+            zero_rates = [r] + [
+                r
+                + (
+                    (1.0 / a)
+                    * (short_rate - r)
+                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    + ((sigma**2) / (4.0 * a**3))
+                    * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
+                    * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
+                )
+                / ((d_ - settle_date) / 360.0)
+                for d_ in dates[1:]
+            ]
+            prev_zero_rates = zero_rates
+        case CurveMode.ROLLUP:
+            # this curve is "lifting up" over time
+            # forwards = [flat_rate] + [flat_rate - (sigma**2)/(2*a**2)*np.square(1. - np.exp(-a*(d_-d)/360)) for d_ in dates[1:]]
+            # curve = ql.ForwardCurve(list(dates), forwards, ql.Actual360(), bond.calendar()) # this doesn't admit semiannual compounding
+            zero_rates = [r] + [
+                r
+                - ((sigma**2) / (2.0 * a**2))
                 * (
-                    ((d_ - settle_date) / 360.0)
-                    - (0.5 / a)
-                    * (1.0 - np.exp(-2.0 * a * ((d_ - settle_date) / 360.0)))
+                    (1.0 / a)
+                    * (short_rate - r)
+                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    + (
+                        ((d_ - settle_date) / 360.0)
+                        - (2.0 / a) * (1.0 - np.exp(-a * ((d_ - settle_date) / 360.0)))
+                        + (0.5 / a)
+                        * (1.0 - np.exp(-2.0 * a * ((d_ - settle_date) / 360.0)))
+                    )
                 )
+                / ((d_ - settle_date) / 360.0)
+                for d_ in dates[1:]
+            ]
+            prev_zero_rates = zero_rates
+        case CurveMode.ROLLDOWN:
+            # this curve is "shifting down" over time (intuitive situation)
+            zero_rates = [r] + [
+                r
+                + (
+                    (1.0 / a)
+                    * (short_rate - r)
+                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    + ((sigma**2) / (2.0 * a**2))
+                    * (
+                        ((d_ - settle_date) / 360.0)
+                        - (0.5 / a)
+                        * (1.0 - np.exp(-2.0 * a * ((d_ - settle_date) / 360.0)))
+                    )
+                )
+                / ((d_ - settle_date) / 360.0)
+                for d_ in dates[1:]
+            ]
+            prev_zero_rates = zero_rates
+        case _:
+            prev_zero_rates = zero_rates = []
+            raise NotImplementedError(
+                f"Unrecognized curve_mode: {model_param.curve_mode}"
             )
-            / ((d_ - settle_date) / 360.0)
-            for d_ in dates[1:]
-        ]
-        prev_zero_rates = zero_rates
-    else:
-        prev_zero_rates = zero_rates = []
-        NotImplementedError(f"Unrecognized curve_mode: {model_param.curve_mode}")
 
     return prev_zero_rates, zero_rates
 
@@ -209,34 +210,26 @@ def calc_zc_bond(
     a = model_param.a
     sigma = model_param.sigma
 
-    if model_param.curve_mode == CurveMode.FLAT:
-        # This formula is taken from "Flat at Inception" by setting t_0=t (PDE rolls)
-        # note: if short_rate == r this reduces to flat curve
-        theta0 = a * r
-        inception_date = bond.calendar().advance(
-            d, bond.settlementDays() - 1, ql.Days
-        )  # rolls of prev curve
-
-    elif model_param.curve_mode == CurveMode.FLATINCEPTION:
-        # zero rates consistent with flat term structure as of bond issue date
-        # (!) for settle_date = bond issue date, this is flat structure but generally not so
-        theta0 = a * r + sigma**2 / (2 * a) * (
-            1.0 - np.exp(-2.0 * a * (settle_date - bond.issueDate()) / 360.0)
-        )
-        inception_date = bond.issueDate()
-    elif model_param.curve_mode == CurveMode.ROLLUP:
-        # this curve is "lifting up" over time
-        # forwards = [flat_rate] + [flat_rate - (sigma**2)/(2*a**2)*np.square(1. - np.exp(-a*(d_-d)/360)) for d_ in dates[1:]]
-        theta0 = a * r
-        inception_date = None
-    elif model_param.curve_mode == CurveMode.ROLLDOWN:
-        # this curve is "shifting down" over time (intuitive situation)
-        theta0 = a * r + sigma**2 / a
-        inception_date = None
-    else:
-        theta0 = 0.0
-        inception_date = None
-        NotImplementedError(f"Unrecognized curve_mode: {model_param.curve_mode}")
+    match model_param.curve_mode:
+        case CurveMode.FLAT:
+            theta0 = a * r
+            inception_date = bond.calendar().advance(
+                d, bond.settlementDays() - 1, ql.Days
+            )  # rolls of prev curve
+        case CurveMode.FLATINCEPTION:
+            theta0 = a * r + sigma**2 / (2 * a) * (
+                1.0 - np.exp(-2.0 * a * (settle_date - bond.issueDate()) / 360.0)
+            )
+            inception_date = bond.issueDate()
+        case CurveMode.ROLLUP:
+            theta0 = a * r
+            inception_date = None
+        case CurveMode.ROLLDOWN:
+            theta0 = a * r + sigma**2 / a
+            inception_date = None
+        case _:
+            theta0 = 0.0
+            inception_date = None
 
     prev_zero_rates, zero_rates = _gen_rate_curves(
         dates, short_rate, model_param, inception_date
