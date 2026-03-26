@@ -1,3 +1,5 @@
+import datetime
+
 from enum import Enum, auto
 
 import numpy as np
@@ -29,47 +31,13 @@ class ModelParam:
         self.grid_points = grid_points if grid_points is not None else 100
 
 
-def get_zc_bond() -> ql.FixedRateBond:
-    settlement_days = 2
-    face_amount = 100
-
-    issue_date = ql.Date(30, 6, 2019)
-    maturity_date = ql.Date(15, 9, 2023)
-    calendar = ql.UnitedStates(ql.UnitedStates.Settlement)
-    payment_convention = ql.Following
-
-    # zcbond = ql.ZeroCouponBond(settlement_days, calendar, face_amount, maturity_date, payment_convention, face_amount, issue_date)
-    # return zcbond
-
-    czcbond = ql.CallableZeroCouponBond(
-        settlement_days,
-        face_amount,
-        calendar,
-        maturity_date,
-        ql.Actual360(),
-        payment_convention,
-        face_amount,
-        issue_date,
-        ql.CallabilitySchedule(),
-    )
-    return czcbond
-
-
-def calc_zc_bond(
-    bond: ql.Bond, d: ql.Date, short_rate: float, model_param: ModelParam
-) -> dict:
-    ql.Settings.instance().evaluationDate = d
-    settle_date = bond.calendar().advance(d, bond.settlementDays(), ql.Days)
-
-    dates = ql.MakeSchedule(
-        d,
-        bond.maturityDate(),  # maturity date will be skipped
-        ql.Period("1D"),
-        calendar=bond.calendar(),
-    )
-    # dates = list(dates)
-    dates = [bond.calendar().advance(x, bond.settlementDays(), ql.Days) for x in dates]
-
+def _gen_rate_curves(
+    dates: list[ql.Date],
+    short_rate: float,
+    model_param: ModelParam,
+    inception_date: ql.Date | None = None,
+):
+    settle_date = dates[0]
     r = model_param.r
     a = model_param.a
     sigma = model_param.sigma
@@ -84,9 +52,6 @@ def calc_zc_bond(
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
-        prev_settle_date = bond.calendar().advance(
-            d, bond.settlementDays() - 1, ql.Days
-        )
         prev_zero_rates = [r] + [
             r
             + (
@@ -94,13 +59,12 @@ def calc_zc_bond(
                 * (short_rate - r)
                 * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
                 + ((sigma**2) / (4.0 * a**3))
-                * (1.0 - np.exp(-2.0 * a * (settle_date - prev_settle_date) / 360.0))
+                * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
                 * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
             )
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
-        theta0 = a * r
     elif model_param.curve_mode == CurveMode.FLATINCEPTION:
         # zero rates consistent with flat term structure as of bond issue date
         # (!) for settle_date = bond issue date, this is flat structure but generally not so
@@ -111,16 +75,13 @@ def calc_zc_bond(
                 * (short_rate - r)
                 * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
                 + ((sigma**2) / (4.0 * a**3))
-                * (1.0 - np.exp(-2.0 * a * (settle_date - bond.issueDate()) / 360.0))
+                * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
                 * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
             )
             / ((d_ - settle_date) / 360.0)
             for d_ in dates[1:]
         ]
         prev_zero_rates = zero_rates
-        theta0 = a * r + sigma**2 / (2 * a) * (
-            1.0 - np.exp(-2.0 * a * (settle_date - bond.issueDate()) / 360.0)
-        )
     elif (
         model_param.curve_mode == CurveMode.ROLLUP
     ):  # this curve is "lifting up" over time
@@ -144,7 +105,6 @@ def calc_zc_bond(
             for d_ in dates[1:]
         ]
         prev_zero_rates = zero_rates
-        theta0 = a * r
     elif (
         model_param.curve_mode == CurveMode.ROLLDOWN
     ):  # this curve is "shifting down" over time (intuitive situation)
@@ -165,12 +125,122 @@ def calc_zc_bond(
             for d_ in dates[1:]
         ]
         prev_zero_rates = zero_rates
-        theta0 = a * r + sigma**2 / a
     else:
         prev_zero_rates = zero_rates = []
-        theta0 = 0.0
         NotImplementedError(f"Unrecognized curve_mode: {model_param.curve_mode}")
 
+    return prev_zero_rates, zero_rates
+
+
+class ZeroCouponBondConfig:
+    def __init__(
+        self,
+        settlement_days: int | None = None,
+        face_amount: float | None = None,
+        issue_date: datetime.date | None = None,
+        maturity_date: datetime.date | None = None,
+    ):
+        self.settlement_days = settlement_days
+        self.face_amount = face_amount
+        self.issue_date = issue_date
+        self.maturity_date = maturity_date
+
+
+def get_zc_bond(bond_config: ZeroCouponBondConfig | None) -> ql.FixedRateBond:
+    settlement_days = (
+        2 if bond_config.settlement_days is None else bond_config.settlement_days
+    )
+    face_amount = 100 if bond_config.face_amount is None else bond_config.face_amount
+    issue_date = ql.Date.from_date(
+        bond_config.issue_date
+    )  # ql.Date.from_date(30, 6, 2019)
+    maturity_date = ql.Date.from_date(bond_config.maturity_date)  # ql.Date(15, 9, 2023)
+    calendar = ql.UnitedStates(ql.UnitedStates.Settlement)
+    payment_convention = ql.Following
+
+    # zcbond = ql.ZeroCouponBond(settlement_days, calendar, face_amount, maturity_date, payment_convention, face_amount, issue_date)
+    # return zcbond
+
+    czcbond = ql.CallableZeroCouponBond(
+        settlement_days,
+        face_amount,
+        calendar,
+        maturity_date,
+        ql.Actual360(),
+        payment_convention,
+        face_amount,
+        issue_date,
+        ql.CallabilitySchedule(),
+    )
+    return czcbond
+
+
+def deserialize_bond_func(func):
+    def deserialized_func(*args, **kwargs):
+        return func(
+            *[
+                get_zc_bond(a) if isinstance(a, ZeroCouponBondConfig) else a
+                for a in args
+            ],
+            **kwargs,
+        )
+
+    return deserialized_func
+
+
+@deserialize_bond_func
+def calc_zc_bond(
+    bond: ql.Bond | ZeroCouponBondConfig,
+    d: ql.Date,
+    short_rate: float,
+    model_param: ModelParam,
+) -> dict:
+    ql.Settings.instance().evaluationDate = d
+    dates = ql.MakeSchedule(
+        d,
+        bond.maturityDate(),  # maturity date will be skipped
+        ql.Period("1D"),
+        calendar=bond.calendar(),
+    )
+    dates = [bond.calendar().advance(x, bond.settlementDays(), ql.Days) for x in dates]
+    settle_date = dates[0]
+
+    r = model_param.r
+    a = model_param.a
+    sigma = model_param.sigma
+
+    if model_param.curve_mode == CurveMode.FLAT:
+        # This formula is taken from "Flat at Inception" by setting t_0=t (PDE rolls)
+        # note: if short_rate == r this reduces to flat curve
+        theta0 = a * r
+        inception_date = bond.calendar().advance(
+            d, bond.settlementDays() - 1, ql.Days
+        )  # rolls of prev curve
+
+    elif model_param.curve_mode == CurveMode.FLATINCEPTION:
+        # zero rates consistent with flat term structure as of bond issue date
+        # (!) for settle_date = bond issue date, this is flat structure but generally not so
+        theta0 = a * r + sigma**2 / (2 * a) * (
+            1.0 - np.exp(-2.0 * a * (settle_date - bond.issueDate()) / 360.0)
+        )
+        inception_date = bond.issueDate()
+    elif model_param.curve_mode == CurveMode.ROLLUP:
+        # this curve is "lifting up" over time
+        # forwards = [flat_rate] + [flat_rate - (sigma**2)/(2*a**2)*np.square(1. - np.exp(-a*(d_-d)/360)) for d_ in dates[1:]]
+        theta0 = a * r
+        inception_date = None
+    elif model_param.curve_mode == CurveMode.ROLLDOWN:
+        # this curve is "shifting down" over time (intuitive situation)
+        theta0 = a * r + sigma**2 / a
+        inception_date = None
+    else:
+        theta0 = 0.0
+        inception_date = None
+        NotImplementedError(f"Unrecognized curve_mode: {model_param.curve_mode}")
+
+    prev_zero_rates, zero_rates = _gen_rate_curves(
+        dates, short_rate, model_param, inception_date
+    )
     curve = ql.ZeroCurve(
         dates,
         zero_rates,
@@ -302,3 +372,17 @@ def pnl_decomposition(res: pl.DataFrame) -> pl.DataFrame:
         cpnl_oas_full=pl.col("pnl_oas_full").cum_sum(),
     )
     return res
+
+
+def job_func_full(
+    zcb_config: ZeroCouponBondConfig,
+    flat_rate: float,
+    model_param: ModelParam,
+    d: datetime.date,
+) -> dict:
+    """Utility for parallel processing"""
+    d = ql.Date.from_date(d)
+    try:
+        return calc_zc_bond(zcb_config, d, flat_rate, model_param)
+    except RuntimeError:
+        return {}
