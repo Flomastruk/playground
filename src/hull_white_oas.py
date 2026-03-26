@@ -31,6 +31,20 @@ class ModelParam:
         self.grid_points = grid_points if grid_points is not None else 100
 
 
+class ZeroCouponBondConfig:
+    def __init__(
+        self,
+        settlement_days: int | None = None,
+        face_amount: float | None = None,
+        issue_date: datetime.date | None = None,
+        maturity_date: datetime.date | None = None,
+    ):
+        self.settlement_days = settlement_days
+        self.face_amount = face_amount
+        self.issue_date = issue_date
+        self.maturity_date = maturity_date
+
+
 def _gen_rate_curves(
     dates: list[ql.Date],
     short_rate: float,
@@ -53,7 +67,7 @@ def _gen_rate_curves(
                 / ((d_ - settle_date) / 360.0)
                 for d_ in dates[1:]
             ]
-            prev_zero_rates = [r] + [
+            prev_zero_rates = [short_rate] + [
                 r
                 + (
                     (1.0 / a)
@@ -69,7 +83,7 @@ def _gen_rate_curves(
         case CurveMode.FLATINCEPTION:
             # zero rates consistent with flat term structure as of bond issue date
             # (!) for settle_date = bond issue date, this is flat structure but generally not so
-            zero_rates = [r] + [
+            zero_rates = [short_rate] + [
                 r
                 + (
                     (1.0 / a)
@@ -87,7 +101,7 @@ def _gen_rate_curves(
             # this curve is "lifting up" over time
             # forwards = [flat_rate] + [flat_rate - (sigma**2)/(2*a**2)*np.square(1. - np.exp(-a*(d_-d)/360)) for d_ in dates[1:]]
             # curve = ql.ForwardCurve(list(dates), forwards, ql.Actual360(), bond.calendar()) # this doesn't admit semiannual compounding
-            zero_rates = [r] + [
+            zero_rates = [short_rate] + [
                 r
                 - ((sigma**2) / (2.0 * a**2))
                 * (
@@ -107,7 +121,7 @@ def _gen_rate_curves(
             prev_zero_rates = zero_rates
         case CurveMode.ROLLDOWN:
             # this curve is "shifting down" over time (intuitive situation)
-            zero_rates = [r] + [
+            zero_rates = [short_rate] + [
                 r
                 + (
                     (1.0 / a)
@@ -133,18 +147,47 @@ def _gen_rate_curves(
     return prev_zero_rates, zero_rates
 
 
-class ZeroCouponBondConfig:
-    def __init__(
-        self,
-        settlement_days: int | None = None,
-        face_amount: float | None = None,
-        issue_date: datetime.date | None = None,
-        maturity_date: datetime.date | None = None,
-    ):
-        self.settlement_days = settlement_days
-        self.face_amount = face_amount
-        self.issue_date = issue_date
-        self.maturity_date = maturity_date
+def simulate_short_rate_paths(
+    dates: list[ql.Date],
+    short_rate: float,
+    model_param: ModelParam,
+    inception_date: ql.Date | None = None,
+    n_paths: float | None = None,
+    calendar: ql.Calendar | None = None,
+):
+    # ql.Settings.instance().evaluationDate = d # TODO: do I need to remove?
+    settle_date = dates[0]
+    if calendar is None:
+        calendar = ql.UnitedStates(ql.UnitedStates.Settlement)
+    a = model_param.a
+    sigma = model_param.sigma
+
+    _, zero_rates = _gen_rate_curves(dates, short_rate, model_param, inception_date)
+    curve = ql.ZeroCurve(
+        dates,
+        zero_rates,
+        ql.Actual360(),
+        calendar,
+        ql.Linear(),
+        ql.Compounded,
+        ql.Semiannual,
+    )
+    ts_handle = ql.YieldTermStructureHandle(curve)
+
+    hw_process = ql.HullWhiteProcess(ts_handle, a, sigma)
+    day_counter = ql.Actual360()
+    grid = ql.TimeGrid([day_counter.yearFraction(settle_date, d_) for d_ in dates])
+    rng = ql.GaussianRandomSequenceGenerator(
+        ql.UniformRandomSequenceGenerator(len(dates) - 1, ql.UniformRandomGenerator())
+    )
+    gen = ql.GaussianPathGenerator(hw_process, grid, rng, False)
+
+    return {
+        "dates": dates,
+        "paths": [
+            list(gen.next().value()) for _ in range(1 if n_paths is None else n_paths)
+        ],
+    }
 
 
 def get_zc_bond(bond_config: ZeroCouponBondConfig | None) -> ql.FixedRateBond:
