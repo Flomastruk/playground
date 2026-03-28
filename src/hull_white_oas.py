@@ -1,5 +1,6 @@
 import datetime
 
+from dataclasses import dataclass
 from enum import Enum, auto
 
 import numpy as np
@@ -14,21 +15,13 @@ class CurveMode(Enum):
     ROLLDOWN = auto()
 
 
-# TODO dataclass
+@dataclass(slots=True)
 class ModelParam:
-    def __init__(
-        self,
-        r: float,
-        curve_mode: CurveMode,
-        a: float | None = None,
-        sigma: float | None = None,
-        grid_points: int | None = None,
-    ) -> None:
-        self.r = r
-        self.a = a if a is not None else 0.2
-        self.curve_mode = curve_mode
-        self.sigma = sigma if sigma is not None else 0.05
-        self.grid_points = grid_points if grid_points is not None else 100
+    r: float
+    curve_mode: CurveMode
+    a: float = 0.2
+    sigma: float = 0.05
+    grid_points: int = 100
 
 
 class ZeroCouponBondConfig:
@@ -63,7 +56,7 @@ def _gen_rate_curves(
                 r
                 + (1.0 / a)
                 * (short_rate - r)
-                * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                * (1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
                 / ((d_ - settle_date) / 360.0)
                 for d_ in dates[1:]
             ]
@@ -72,7 +65,7 @@ def _gen_rate_curves(
                 + (
                     (1.0 / a)
                     * (short_rate - r)
-                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    * (1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
                     + ((sigma**2) / (4.0 * a**3))
                     * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
                     * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
@@ -88,7 +81,7 @@ def _gen_rate_curves(
                 + (
                     (1.0 / a)
                     * (short_rate - r)
-                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    * (1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
                     + ((sigma**2) / (4.0 * a**3))
                     * (1.0 - np.exp(-2.0 * a * (settle_date - inception_date) / 360.0))
                     * np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
@@ -103,12 +96,12 @@ def _gen_rate_curves(
             # curve = ql.ForwardCurve(list(dates), forwards, ql.Actual360(), bond.calendar()) # this doesn't admit semiannual compounding
             zero_rates = [short_rate] + [
                 r
-                - ((sigma**2) / (2.0 * a**2))
-                * (
+                + (
                     (1.0 / a)
                     * (short_rate - r)
-                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
-                    + (
+                    * (1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
+                    - ((sigma**2) / (2.0 * a**2))
+                    * (
                         ((d_ - settle_date) / 360.0)
                         - (2.0 / a) * (1.0 - np.exp(-a * ((d_ - settle_date) / 360.0)))
                         + (0.5 / a)
@@ -126,7 +119,7 @@ def _gen_rate_curves(
                 + (
                     (1.0 / a)
                     * (short_rate - r)
-                    * (np.square(1.0 - np.exp(-a * (d_ - settle_date) / 360.0)))
+                    * (1.0 - np.exp(-a * (d_ - settle_date) / 360.0))
                     + ((sigma**2) / (2.0 * a**2))
                     * (
                         ((d_ - settle_date) / 360.0)
@@ -154,8 +147,8 @@ def simulate_short_rate_paths(
     inception_date: ql.Date | None = None,
     n_paths: float | None = None,
     calendar: ql.Calendar | None = None,
+    seed: int = 0,
 ):
-    # ql.Settings.instance().evaluationDate = d # TODO: do I need to remove?
     settle_date = dates[0]
     if calendar is None:
         calendar = ql.UnitedStates(ql.UnitedStates.Settlement)
@@ -178,7 +171,9 @@ def simulate_short_rate_paths(
     day_counter = ql.Actual360()
     grid = ql.TimeGrid([day_counter.yearFraction(settle_date, d_) for d_ in dates])
     rng = ql.GaussianRandomSequenceGenerator(
-        ql.UniformRandomSequenceGenerator(len(dates) - 1, ql.UniformRandomGenerator())
+        ql.UniformRandomSequenceGenerator(
+            len(dates) - 1, ql.UniformRandomGenerator(seed=seed)
+        )
     )
     gen = ql.GaussianPathGenerator(hw_process, grid, rng, False)
 
@@ -357,9 +352,8 @@ def pnl_decomposition(res: pl.DataFrame) -> pl.DataFrame:
     freq = 2
     res = (
         res.with_columns(
-            ddays=(
-                pl.col("settle_date").shift(-1) - pl.col("settle_date")
-            ).dt.total_days(),
+            ddays=pl.col("settle_date").diff(-1).dt.total_days().neg(),
+            dr=pl.col("short_rate").diff(-1).neg(),
             dv_dt_oas=pl.col("short_rate")
             .truediv(freq)
             .add(1.0)
@@ -380,45 +374,53 @@ def pnl_decomposition(res: pl.DataFrame) -> pl.DataFrame:
             ),
         )
         .with_columns(
-            pnl_oas=pl.col("dv_dt_oas").mul(pl.col("ddays")).truediv(360.0),
-            pnl_dur=pl.col("dv_dt_dur").mul(pl.col("ddays")).truediv(360.0),
-            pnl_conv=pl.col("dv_dt_conv").mul(pl.col("ddays")).truediv(360.0),
-            pnl_roll=(pl.col("price") - pl.col("rolled_price")).shift(-1),
+            pnl_theta_carry=pl.col("dv_dt_oas").mul(pl.col("ddays")).truediv(360.0),
+            pnl_theta_dur=pl.col("dv_dt_dur").mul(pl.col("ddays")).truediv(360.0),
+            pnl_theta_conv=pl.col("dv_dt_conv").mul(pl.col("ddays")).truediv(360.0),
+            pnl_dr=pl.col("pde_duration").mul("price").mul("dr").neg(),
+            pnl_dr2=pl.col("pde_convexity").mul("price").mul(0.5 * pl.col("dr").pow(2)),
+            pnl_model_roll=(pl.col("price") - pl.col("rolled_price")).shift(-1),
         )
         .with_columns(
-            pnl_oas_full=pl.col("pnl_oas")
-            + pl.col("pnl_dur")
-            + pl.col("pnl_conv")
-            + pl.col("pnl_roll"),
-            pnl_err=(
-                pl.col("pnl_oas")
-                + pl.col("pnl_dur")
-                + pl.col("pnl_conv")
-                + pl.col("pnl_roll")
-            ).sub(pl.col("pnl")),
+            pnl_decomposition=pl.col("pnl_theta_carry")
+            + pl.col("pnl_theta_dur")
+            + pl.col("pnl_theta_conv")
+            + pl.col("pnl_dr")
+            + pl.col("pnl_dr2")
+            + pl.col("pnl_model_roll")
         )
+        .with_columns(pnl_err=pl.col("pnl") - pl.col("pnl_decomposition"))
     )
+    # cumulative results
+    res = res.with_columns(pl.selectors.starts_with("pnl").cum_sum().name.prefix("c"))
 
-    res = res.with_columns(
-        cpnl=pl.col("pnl").cum_sum(),
-        cpnl_oas=pl.col("pnl_oas").cum_sum(),
-        cpnl_dur=pl.col("pnl_dur").cum_sum(),
-        cpnl_conv=pl.col("pnl_conv").cum_sum(),
-        cpnl_roll=pl.col("pnl_roll").cum_sum(),
-        cpnl_oas_full=pl.col("pnl_oas_full").cum_sum(),
-    )
     return res
 
 
-def job_func_full(
+class unpack:
+    def __init__(self, func):
+        self.func = func
+        # self.__name__ = func.__name__
+        # self.__doc__ = func.__doc__
+
+    def __call__(self, *args, **kwargs):
+        args = list(args)
+        if args and isinstance(args[-1], (list, tuple)):
+            args.extend(args.pop())
+        return self.func(*args, **kwargs)
+
+
+def job_func_full_(
     zcb_config: ZeroCouponBondConfig,
-    flat_rate: float,
     model_param: ModelParam,
+    short_rate: float,
     d: datetime.date,
 ) -> dict:
     """Utility for parallel processing"""
-    d = ql.Date.from_date(d)
     try:
-        return calc_zc_bond(zcb_config, d, flat_rate, model_param)
+        return calc_zc_bond(zcb_config, ql.Date.from_date(d), short_rate, model_param)
     except RuntimeError:
         return {}
+
+
+job_func_full = unpack(job_func_full_)
