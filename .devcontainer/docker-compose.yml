@@ -13,5 +13,8 @@ services:
       - ../:/workspace
       # this mirrors volume defined in top-level `volumes` section
       - data:/data
+      - claude-config:/root/.claude
 volumes:
   data:
+  claude-config:
+    external: true

@@ -1,7 +1,11 @@
-FROM python:3.14-trixie
+FROM python:3.12-bookworm
 
-RUN pip install --upgrade pip
+WORKDIR /workspace
 
-COPY ../reqs/requirements.txt reqs/
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
 
-RUN pip install -r reqs/requirements.txt
+COPY pyproject.toml ./
+
+ENV UV_PROJECT_ENVIRONMENT=/.venv
+
+RUN uv sync --no-dev

@@ -1,0 +1,20 @@
+[project]
+name = "Playground"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "ipython==9.16.1",
+    "ipywidgets==8.1.8",
+    "jupyterlab==4.6.2",
+    "numpy==2.5.1",
+    "pandas==2.3.0",
+    "plotly==6.5.0",
+    "polars==1.42",
+    "pyarrow==25.0.1",
+    "QuantLib==1.43",
+    "scipy==1.16.3",
+    "seaborn==0.13.2",
+    "scikit-learn==1.7.2",
+    "tqdm==4.67.1",
+    "xlsx2csv==0.8.4",
+]
